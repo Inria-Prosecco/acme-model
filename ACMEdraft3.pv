@@ -1,0 +1,320 @@
+type cert.
+type key.
+type domain.
+type ip.
+type request.
+
+const g: key.
+
+fun key2bit(key): bitstring [typeConverter].
+fun bit2key(bitstring): key [typeConverter].
+
+fun hmac(key,bitstring): bitstring.
+fun hkdf(key,bitstring): key.
+
+fun dh(key,key): key.
+equation forall a:key, b:key;
+	dh(dh(g,a), b) = dh(dh(g,b), a).
+
+fun sign(key,bitstring): bitstring.
+fun sigpk(key): key.
+reduc forall k:key, m:bitstring;
+	sigver(sigpk(k),sign(k,m)) = m.
+reduc forall k:key, m:bitstring;
+	sigval(sign(k,m)) = m.
+
+fun packkeys(bitstring, bitstring, key, key): bitstring.
+reduc forall b1:bitstring, b2:bitstring, k1:key, k2:key;
+	unpackkeys(packkeys(b1, b2, k1, k2)) = (b1, b2, k1, k2).
+
+fun cert2bit(cert): bitstring [typeConverter].
+fun bit2cert(bitstring): cert [typeConverter].
+
+fun genCert(key, domain): cert.
+reduc forall k:key, d:domain;
+	unpackCert(genCert(k, d)) = (sigpk(k), d).
+
+(* ---------------------------------------------------------------- *)
+
+const pub: channel.
+
+const newreg: bitstring.
+const newauthz: bitstring.
+const newcert: bitstring.
+const recovery: bitstring.
+
+const A1k: key [private].
+const A2k: key [private].
+
+const D: domain.
+const Dk: key [private].
+const Dhttp: channel [private].
+const Demail: channel [private].
+const DdnsTxt: channel [private].
+
+const B: domain.
+const Bk: key [private].
+const Bhttp: channel [private].
+const Bemail: channel [private].
+const BdnsTxt: channel [private].
+
+const M: domain.
+const Mk: key [private].
+const Mhttp: channel [private].
+const Memail: channel [private].
+const MdnsTxt: channel [private].
+
+fun ipForDomain(domain): ip [data].
+fun auth(domain): bitstring [data].
+
+fun emailAddress(channel): bitstring.
+reduc forall email:channel;
+	resolveEmail(emailAddress(email)) = email.
+
+fun write(channel):channel [data].
+fun read(channel):channel [data].
+
+table acmeClients(key).
+table acmeServers(key).
+table acmeClientsRecovery(bitstring,key).
+table acmeServersRecovery(bitstring,key).
+
+table dnsARecords(domain,ip).
+table recordsPrivate(domain,ip,channel,channel,channel).
+table recordsPublic(ip,channel,channel,channel).
+
+(* ---------------------------------------------------------------- *)
+
+let routingProxy() = !(
+	get recordsPrivate(d,ip,email,http,dnsTxt) in
+	in(write(email),x:bitstring);
+	out(read(email),x)
+) | !(
+	get recordsPrivate(d,ip,email,http,dnsTxt) in
+	in(pub,x:bitstring);
+	out(read(email),x)
+) | !(
+	get recordsPrivate(d,ip,email,http,dnsTxt) in
+	in(write(http),x:bitstring);
+	out(pub,x);
+	out(read(http),x)
+) | !(
+	get recordsPrivate(d,ip,email,http,dnsTxt) in
+	in(write(dnsTxt),x:bitstring);
+	out(pub,x);
+	out(read(dnsTxt),x)
+).
+
+(* ---------------------------------------------------------------- *)
+
+event DomainOwner(key, domain).
+event HttpAuth(key, domain).
+event DnsAuth(key, domain).
+event CertIssued(domain, cert, key, key).
+event CertReceived(domain, cert, key, key).
+
+event ActiveHttpAttack(domain).
+event ActiveDnsAttack(domain).
+
+event ClientMacRecovery(bitstring).
+event ServerMacRecovery(bitstring).
+
+query Cc:bitstring;
+	event(ServerMacRecovery(Cc)) ==> event(ClientMacRecovery(Cc)).
+
+query c:cert, k:key, s:key;
+	event(CertReceived(D, c, k, s)) ==> event(CertIssued(D, c, k, s)) || event(ActiveDnsAttack(D)) || event(ActiveHttpAttack(D)).
+
+query c:cert, k:key, s:key;
+	event(CertReceived(D, c, k, s)).
+
+query c:cert, k:key, s:key;
+	event(CertIssued(D, c, k, s)).
+
+query p:key;
+	event(DnsAuth(p, D)) ==> event(DomainOwner(p, D)) || event(ActiveDnsAttack(D)).
+
+query p:key;
+	event(HttpAuth(p, D)) ==> event(DomainOwner(p, D)) || event(ActiveDnsAttack(D)) || event(ActiveHttpAttack(D)).
+
+query p:key;
+	event(DnsAuth(p, D)).
+
+query p:key,d:domain;
+	event(HttpAuth(p, D)).
+
+query p:key,d:domain;
+	event(DomainOwner(p, D)).
+
+(* ---------------------------------------------------------------- *)
+
+let clientRegister() = !(
+	get acmeClients(Ck:key) in
+	get acmeServers(Ak:key) in
+	get recordsPrivate(d,ip,email,http,dnsTxt) in
+	let Cpk = sigpk(Ck) in
+	let Apk = sigpk(Ak) in
+	new Crk:key;
+	let Cc = emailAddress(email) in
+	let Cprk = dh(g, Crk) in
+	out(pub, (
+		Apk,
+		sign(Ck, packkeys(newreg, Cc, Cpk, Cprk))
+	));
+	in(pub, (=Cpk, Aprk:bitstring));
+	if sigver(Apk, Aprk) = sigval(Aprk) then (
+		let CrecoveryA = hkdf(dh(bit2key(Aprk), Crk), recovery) in
+		insert acmeClientsRecovery(Cc, CrecoveryA);
+		0
+	)
+).
+
+let serverHandleRegister() = !(
+	get acmeServers(Ak:key) in
+	let Apk = sigpk(Ak) in
+	in(pub, (=Apk, pack:bitstring));
+	let (b1:bitstring, Cc:bitstring, Cpk:key, Cprk:key) = unpackkeys(sigval(pack)) in
+	if sigver(Cpk, pack) = sigval(pack) then (
+		new Ark:key;
+		let Aprk = dh(g, Ark) in
+		let CrecoveryA = hkdf(dh(Cprk, Ark), recovery) in
+		insert acmeServersRecovery(Cc, CrecoveryA);
+		out(pub, (Cpk, sign(Ak, key2bit(Aprk))))
+	)
+).
+
+let clientHttpAuth() = !(
+	get acmeClients(Ck:key) in
+	get acmeServers(Ak:key) in
+	get recordsPrivate(d,ip,email,http,dnsTxt) in
+	let Cpk = sigpk(Ck) in
+	let Apk = sigpk(Ak) in
+	event DomainOwner(Cpk, d);
+	out(pub, (Apk, sign(Ck, auth(d))));
+	in(pub, (=Cpk, AuriC:bitstring));
+	out(write(http), sign(Cpk, AuriC));
+	in(pub, (=Cpk, myCertSig:bitstring));
+	if sigver(sigpk(Ak), myCertSig) = sigval(myCertSig) then (
+		let myCert = bit2cert(sigval(myCertSig)) in
+		let (certSigner:key, certDomain:domain) = unpackCert(myCert) in
+		event CertReceived(certDomain, myCert, Cpk, certSigner)
+	)
+).
+
+let serverHttpAuth() = !(
+	get acmeServers(Ak:key) in
+	get acmeClients(Ck:key) in
+	get dnsARecords(d,ip) in
+	get recordsPublic(=ip,emailWrite,httpRead,dnsTxtRead) in
+	let Cpk = sigpk(Ck) in
+	let Apk = sigpk(Ak) in
+	in(pub, (=Apk, ad:bitstring));
+	if sigver(Cpk, ad) = auth(d) then (
+		new AuriC:bitstring;
+		out(pub, (Cpk, AuriC));
+		in(httpRead, sigAuriC:bitstring);
+		if (sigver(Cpk, sigAuriC)) = AuriC then (
+			event HttpAuth(Cpk, d);
+			let theCert = genCert(Ak, d) in
+			event CertIssued(d, theCert, Cpk, sigpk(Ak));
+			out(pub, (Cpk, sign(Ak, cert2bit(theCert))))
+		)
+	)
+).
+
+let clientDnsAuth() = !(
+	get acmeClients(Ck:key) in
+	get acmeServers(Ak:key) in
+	get recordsPrivate(d,ip,email,http,dnsTxt) in
+	let Cpk = sigpk(Ck) in
+	let Apk = sigpk(Ak) in
+	event DomainOwner(Cpk, d);
+	out(pub, (Apk, sign(Ck, auth(d))));
+	in(pub, (=Cpk, AdnsC:bitstring));
+	out(write(dnsTxt), AdnsC);
+	in(pub, (=Cpk, myCertSig:bitstring));
+	if sigver(sigpk(Ak), myCertSig) = sigval(myCertSig) then (
+		let myCert = bit2cert(sigval(myCertSig)) in
+		let (certSigner:key, certDomain:domain) = unpackCert(myCert) in
+		event CertReceived(certDomain, myCert, Cpk, certSigner)
+	)
+).
+
+let serverDnsAuth() = !(
+	get acmeServers(Ak:key) in
+	get acmeClients(Ck:key) in
+	get dnsARecords(d,ip) in
+	get recordsPublic(=ip,emailWrite,httpRead,dnsTxtRead) in
+	let Cpk = sigpk(Ck) in
+	let Apk = sigpk(Ak) in
+	in(pub, (=Apk, ad:bitstring));
+	if sigver(Cpk, ad) = auth(d) then (
+		new AdnsC:bitstring;
+		out(pub, (Cpk, AdnsC));
+		in(dnsTxtRead, =AdnsC);
+		event DnsAuth(Cpk, d);
+		(* Here we can distinguish a credential forwarding attack. *)
+		let theCert = genCert(Ak, d) in
+		event CertIssued(d, theCert, Cpk, sigpk(Ak));
+		out(pub, (Cpk, sign(Ak, cert2bit(theCert))))
+	)
+).
+
+let clientMacRecovery() = !(
+	get acmeClientsRecovery(Cc:bitstring, CrecoveryA:key) in
+	event ClientMacRecovery(Cc);
+	in(read(resolveEmail(Cc)), recChallenge:bitstring);
+	out(pub, hmac(CrecoveryA, recChallenge))
+).
+
+let serverMacRecovery() = !(
+	get acmeServers(Ak:key) in
+	let Apk = sigpk(Ak) in
+	get acmeServersRecovery(Cc:bitstring, CrecoveryA:key) in
+	new recChallenge:bitstring;
+	out(write(resolveEmail(Cc)), recChallenge);
+	let response = hmac(CrecoveryA, recChallenge) in
+	in(pub, =response);
+	event ServerMacRecovery(Cc)
+).
+
+let manInTheMiddleHttp(d:domain) = !(
+	event ActiveHttpAttack(d);
+	get recordsPrivate(=d,ip,email,http,dnsTxt) in
+	out(pub, http)
+).
+
+let poisonDnsARecord(d:domain) = !(
+	event ActiveDnsAttack(d);
+	insert dnsARecords(d, ipForDomain(M))
+).
+
+(* ---------------------------------------------------------------- *)
+
+process
+	insert acmeClients(Dk);
+	insert acmeClients(Bk);
+	insert acmeClients(Mk);
+
+	insert acmeServers(A1k);
+	insert acmeServers(A2k);
+
+	insert dnsARecords(D,ipForDomain(D));
+	insert dnsARecords(B,ipForDomain(B));
+	insert dnsARecords(M,ipForDomain(M));
+
+	insert recordsPrivate(D,ipForDomain(D),Demail,Dhttp,DdnsTxt);
+	insert recordsPrivate(B,ipForDomain(B),Bemail,Bhttp,BdnsTxt);
+	insert recordsPrivate(M,ipForDomain(M),Memail,Mhttp,MdnsTxt);
+	insert recordsPublic(ipForDomain(D),write(Demail),read(Dhttp),read(DdnsTxt));
+	insert recordsPublic(ipForDomain(B),write(Bemail),read(Bhttp),read(BdnsTxt));
+	insert recordsPublic(ipForDomain(M),write(Memail),read(Mhttp),read(MdnsTxt));
+
+	(
+		!out(pub,(Mhttp,Memail,MdnsTxt,Mk))               |
+		routingProxy()                                    |
+		clientRegister()        | serverHandleRegister()  |
+		clientHttpAuth()        | serverHttpAuth()        |
+		clientDnsAuth()         | serverDnsAuth()         |
+		poisonDnsARecord(D)     | manInTheMiddleHttp(D)
+	)
