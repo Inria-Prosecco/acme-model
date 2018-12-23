@@ -51,18 +51,21 @@ const Dk: key [private].
 const Dhttp: channel [private].
 const Demail: channel [private].
 const DdnsTxt: channel [private].
+const Dtls: channel [private].
 
 const B: domain.
 const Bk: key [private].
 const Bhttp: channel [private].
 const Bemail: channel [private].
 const BdnsTxt: channel [private].
+const Btls: channel [private].
 
 const M: domain.
 const Mk: key [private].
 const Mhttp: channel [private].
 const Memail: channel [private].
 const MdnsTxt: channel [private].
+const Mtls: channel [private].
 
 fun ipForDomain(domain): ip [data].
 fun auth(domain): bitstring [data].
@@ -81,6 +84,7 @@ table acmeServersRecovery(bitstring,key).
 
 table dnsARecords(domain,ip).
 table recordsPrivate(domain,ip,channel,channel,channel).
+table recordsTls(key,channel).
 table recordsPublic(ip,channel,channel,channel).
 
 (* ---------------------------------------------------------------- *)
@@ -191,9 +195,10 @@ let clientHttpAuth() = !(
 	let Apk = sigpk(Ak) in
 	event DomainOwner(Cpk, d);
 	out(pub, (Apk, sign(Ck, auth(d))));
-	in(pub, (=Cpk, AuriC:bitstring));
+	get recordsTls(=Cpk, tls:channel) in
+	in(tls, (=Cpk, AuriC:bitstring));
 	out(write(http), sign(Cpk, AuriC));
-	in(pub, (=Cpk, myCertSig:bitstring));
+	in(tls, (=Cpk, myCertSig:bitstring));
 	if sigver(sigpk(Ak), myCertSig) = sigval(myCertSig) then (
 		let myCert = bit2cert(sigval(myCertSig)) in
 		let (certSigner:key, certDomain:domain) = unpackCert(myCert) in
@@ -211,13 +216,14 @@ let serverHttpAuth() = !(
 	in(pub, (=Apk, ad:bitstring));
 	if sigver(Cpk, ad) = auth(d) then (
 		new AuriC:bitstring;
-		out(pub, (Cpk, AuriC));
+		get recordsTls(=Cpk, tls:channel) in
+		out(tls, (Cpk, AuriC));
 		in(httpRead, sigAuriC:bitstring);
 		if (sigver(Cpk, sigAuriC)) = AuriC then (
 			event HttpAuth(Cpk, d);
 			let theCert = genCert(Ak, d) in
 			event CertIssued(d, theCert, Cpk, sigpk(Ak));
-			out(pub, (Cpk, sign(Ak, cert2bit(theCert))))
+			out(tls, (Cpk, sign(Ak, cert2bit(theCert))))
 		)
 	)
 ).
@@ -230,9 +236,10 @@ let clientDnsAuth() = !(
 	let Apk = sigpk(Ak) in
 	event DomainOwner(Cpk, d);
 	out(pub, (Apk, sign(Ck, auth(d))));
-	in(pub, (=Cpk, AdnsC:bitstring));
+	get recordsTls(=Cpk, tls:channel) in
+	in(tls, (=Cpk, AdnsC:bitstring));
 	out(write(dnsTxt), AdnsC);
-	in(pub, (=Cpk, myCertSig:bitstring));
+	in(tls, (=Cpk, myCertSig:bitstring));
 	if sigver(sigpk(Ak), myCertSig) = sigval(myCertSig) then (
 		let myCert = bit2cert(sigval(myCertSig)) in
 		let (certSigner:key, certDomain:domain) = unpackCert(myCert) in
@@ -250,13 +257,14 @@ let serverDnsAuth() = !(
 	in(pub, (=Apk, ad:bitstring));
 	if sigver(Cpk, ad) = auth(d) then (
 		new AdnsC:bitstring;
-		out(pub, (Cpk, AdnsC));
+		get recordsTls(=Cpk, tls:channel) in
+		out(tls, (Cpk, AdnsC));
 		in(dnsTxtRead, =AdnsC);
 		event DnsAuth(Cpk, d);
 		(* Here we can distinguish a credential forwarding attack. *)
 		let theCert = genCert(Ak, d) in
 		event CertIssued(d, theCert, Cpk, sigpk(Ak));
-		out(pub, (Cpk, sign(Ak, cert2bit(theCert))))
+		out(tls, (Cpk, sign(Ak, cert2bit(theCert))))
 	)
 ).
 
@@ -306,12 +314,15 @@ process
 	insert recordsPrivate(D,ipForDomain(D),Demail,Dhttp,DdnsTxt);
 	insert recordsPrivate(B,ipForDomain(B),Bemail,Bhttp,BdnsTxt);
 	insert recordsPrivate(M,ipForDomain(M),Memail,Mhttp,MdnsTxt);
+	insert recordsTls(sigpk(Dk),Dtls);
+	insert recordsTls(sigpk(Bk),Btls);
+	insert recordsTls(sigpk(Mk),Mtls);
 	insert recordsPublic(ipForDomain(D),write(Demail),read(Dhttp),read(DdnsTxt));
 	insert recordsPublic(ipForDomain(B),write(Bemail),read(Bhttp),read(BdnsTxt));
 	insert recordsPublic(ipForDomain(M),write(Memail),read(Mhttp),read(MdnsTxt));
 
 	(
-		!out(pub,(Mhttp,Memail,MdnsTxt,Mk))               |
+		!out(pub,(Mhttp,Memail,MdnsTxt,Mk,Mtls))               |
 		routingProxy()                                    |
 		clientRegister()        | serverHandleRegister()  |
 		clientHttpAuth()        | serverHttpAuth()        |
